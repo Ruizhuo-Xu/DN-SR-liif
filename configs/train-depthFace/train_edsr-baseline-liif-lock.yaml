@@ -2,7 +2,8 @@ train_dataset:
   dataset:
     name: paired-image-folders
     args:
-      root_path_1: datafiles/lock3dface_avg_train.txt
+      # root_path_1: datafiles/lock3dface_avg_train.txt
+      root_path_1: datafiles/lock3dface_train.txt
       root_path_2: datafiles/lock3dface_train.txt
       repeat: 1
       # first_k: 220000
@@ -10,17 +11,19 @@ train_dataset:
   wrapper:
     name: sr-implicit-downsampled
     args:
-      inp_size: 32
-      scale_max: 4
+      inp_size: 16
+      scale_min: 4
+      scale_max: 8
       augment: true
-      sample_q: 1024
+      sample_q: 256
   batch_size: 128
 
 val_dataset:
   dataset:
     name: paired-image-folders
     args:
-      root_path_1: datafiles/lock3dface_avg_test.txt
+      # root_path_1: datafiles/lock3dface_avg_test.txt
+      root_path_1: datafiles/lock3dface_test.txt
       root_path_2: datafiles/lock3dface_test.txt
       # first_k: 10
       repeat: 1
@@ -28,10 +31,11 @@ val_dataset:
   wrapper:
     name: sr-implicit-downsampled
     args:
-      inp_size: 32
-      scale_max: 4
-      sample_q: 1024
-  batch_size: 16
+      inp_size: 16
+      scale_min: 4
+      scale_max: 8
+      sample_q: 256
+  batch_size: 128
 
 data_norm:
   inp: {sub: [0.5], div: [0.5]}
@@ -44,24 +48,27 @@ model:
       name: edsr-baseline
       args:
         no_upsampling: true
+        n_resblocks: 8
     imnet_spec:
       name: mlp
       args:
         out_dim: 3
         hidden_list: [256, 256, 256, 256]
-    local_ensemble: False
-    feat_unfold: False
-    cell_decode: False
+    local_ensemble: True
+    feat_unfold: True
+    cell_decode: True
+
+# resume: 'save/lock3dface_ori_SR_4_8/epoch-last.pth'
 
 optimizer:
   name: adam
   args:
     lr: 1.e-4
-epoch_max: 100
+epoch_max: 500
 multi_step_lr:
   # milestones: [200, 400, 600, 800]
   # milestones: [20, 40, 60, 80]
-  milestones: [200]
+  milestones: [250]
   gamma: 0.5
 
 epoch_val: 1
