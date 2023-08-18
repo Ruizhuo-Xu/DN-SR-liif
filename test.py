@@ -15,7 +15,12 @@ import utils
 
 def batched_predict(model, inp, coord, cell, bsize):
     with torch.no_grad():
-        model.gen_feat(inp)
+        if inp.shape[1] == 3:
+            model.gen_feat(inp)
+        elif inp.shape[1] == 6:
+            inp_depth = inp[:, :3, :, :]
+            inp_normal = inp[:, 3:, :, :]
+            model.gen_feat(inp_depth, inp_normal)
         n = coord.shape[1]
         ql = 0
         preds = []

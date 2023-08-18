@@ -1,6 +1,7 @@
 import os
 import json
 from PIL import Image
+import random
 
 import pickle
 import imageio
@@ -11,14 +12,17 @@ from torchvision import transforms
 import cv2 as cv
 
 from datasets import register
+from utils import add_noise_Guass, calc_normalMap
 
 @register('image-folder')
 class ImageFolder(Dataset):
 
     def __init__(self, datafile: str, first_k: int=None, repeat: int=1,
-                 cache: str='none'):
+                 cache: str='none', augment=True):
         self.repeat = repeat
         self.cache = cache
+        # self.add_noise = add_noise
+        self.augment = augment
         if '.txt' in datafile:
             file_paths = np.loadtxt(datafile, dtype=str).tolist()
         elif '.npy' in datafile:
@@ -47,14 +51,26 @@ class ImageFolder(Dataset):
 
         if self.cache == 'none':
             img = cv.imread(x)
-            # depth = img[:, :, 0]
-            # normal = calc_normalMap(depth).astype(np.uint8)
+            # if self.add_noise:
+            img_noisy = add_noise_Guass(img, var=0.001)
+            if self.augment:
+                if random.random() < 0.5:
+                    # flip horizontal
+                    img = cv.flip(img, 1)
+                    img_noisy = cv.flip(img_noisy, 1)
+                if random.random() < 0.5:
+                    # flip vertical
+                    img = cv.flip(img, 0)
+                    img_noisy = cv.flip(img_noisy, 0)
+            depth = img_noisy[:, :, 0]
+            normal = calc_normalMap(depth).astype(np.uint8)
             # img = np.concatenate([depth[:, :, None], normal], axis=2)
+            img_noisy = np.concatenate([img_noisy, normal], axis=2)
             # pdb.set_trace()
             # img = img[:,:,0]
             # img = np.stack([img, img, img], axis=2)
-            return transforms.ToTensor()(img)
-        
+            # (6, H, W), (3, H, W)
+            return transforms.ToTensor()(img_noisy), transforms.ToTensor()(img)
         elif self.cache == 'bin':
             raise NotImplementedError
 
@@ -125,9 +141,9 @@ class ImageFolder(Dataset):
 @register('paired-image-folders')
 class PairedImageFolders(Dataset):
 
-    def __init__(self, root_path_1, root_path_2, **kwargs):
+    def __init__(self, root_path_1, root_path_2, add_noise=False, **kwargs):
         self.dataset_1 = ImageFolder(root_path_1, **kwargs)
-        self.dataset_2 = ImageFolder(root_path_2, **kwargs)
+        self.dataset_2 = ImageFolder(root_path_2, add_noise=add_noise, **kwargs)
 
     def __len__(self):
         return len(self.dataset_1)

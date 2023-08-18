@@ -175,7 +175,73 @@ class SRImplicitDownsampled(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
+        img_noisy, img = self.dataset[idx]
+        assert img_noisy.shape[0] == 6 and img.shape[0] == 3
+        s = random.uniform(self.scale_min, self.scale_max)
+
+        if self.inp_size is None:
+            pass
+            # h_lr = math.floor(img.shape[-2] / s + 1e-9)
+            # w_lr = math.floor(img.shape[-1] / s + 1e-9)
+            # img = img[:, :round(h_lr * s), :round(w_lr * s)] # assume round int
+            # img_down = resize_fn(img, (h_lr, w_lr))
+            # crop_lr, crop_hr = img_down, img
+        else:
+            w_lr = self.inp_size
+            w_hr = round(w_lr * s)
+            x0 = random.randint(0, img_noisy.shape[-2] - w_hr)
+            y0 = random.randint(0, img_noisy.shape[-1] - w_hr)
+            crop_hr_hq = img[:, x0: x0 + w_hr, y0: y0 + w_hr]
+            crop_hr_lq = img_noisy[:, x0: x0 + w_hr, y0: y0 + w_hr]
+            crop_lr_lq_1 = resize_fn(crop_hr_lq[:3, :, :], w_lr)
+            crop_lr_lq_2 = resize_fn(crop_hr_lq[3:, :, :], w_lr)
+            crop_hr = crop_hr_hq
+            crop_lr = torch.cat([crop_lr_lq_1, crop_lr_lq_2], dim=0)
+
+
+        # (H, W, 2) (H, W, 3)
+        # crop_hr = crop_hr[:3, :, :]
+        hr_coord, hr_rgb = to_pixel_samples(crop_hr.contiguous())
+
+        if self.sample_q is not None:
+            sample_lst = np.random.choice(
+                len(hr_coord), self.sample_q, replace=False)
+            hr_coord = hr_coord[sample_lst]
+            hr_rgb = hr_rgb[sample_lst]
+
+        cell = torch.ones_like(hr_coord)
+        cell[:, 0] *= 2 / crop_hr.shape[-2]
+        cell[:, 1] *= 2 / crop_hr.shape[-1]
+
+        # crop_lr: (6, H, W)
+        return {
+            'inp': crop_lr,
+            'coord': hr_coord,
+            'cell': cell,
+            'gt': hr_rgb
+        }
+
+
+@register('sr-implicit-downsampled-paired')
+class SRImplicitDownsampled(Dataset):
+
+    def __init__(self, dataset, inp_size=None, scale_min=1, scale_max=None,
+                 augment=False, sample_q=None):
+        self.dataset = dataset
+        self.inp_size = inp_size
+        self.scale_min = scale_min
+        if scale_max is None:
+            scale_max = scale_min
+        self.scale_max = scale_max
+        self.augment = augment
+        self.sample_q = sample_q
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
         hq_img, lq_img = self.dataset[idx]
+        assert hq_img.shape[0] == 6 and lq_img.shape[0] == 6
         s = random.uniform(self.scale_min, self.scale_max)
 
         if self.inp_size is None:
@@ -214,6 +280,7 @@ class SRImplicitDownsampled(Dataset):
             crop_hr = augment(crop_hr)
 
         # (H, W, 2) (H, W, 3)
+        # crop_hr = crop_hr[:3, :, :]
         hr_coord, hr_rgb = to_pixel_samples(crop_hr.contiguous())
 
         if self.sample_q is not None:
@@ -226,6 +293,7 @@ class SRImplicitDownsampled(Dataset):
         cell[:, 0] *= 2 / crop_hr.shape[-2]
         cell[:, 1] *= 2 / crop_hr.shape[-1]
 
+        # crop_lr: (6, H, W)
         return {
             'inp': crop_lr,
             'coord': hr_coord,
