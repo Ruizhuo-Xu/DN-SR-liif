@@ -1,0 +1,18 @@
+val_dataset:
+  dataset:
+    name: lock3d-folder
+    args:
+      datafile: datafiles/test_lock3dface_noise0.001.txt
+      num2id: datafiles/num2id_lock3d.npy
+      repeat: 1
+  batch_size: 64
+
+gallery:
+  name: lock3d-folder
+  args:
+    datafile: datafiles/lock3dface_gallery.txt
+    num2id: datafiles/num2id_lock3d.npy
+    repeat: 1
+
+ckp: /home/rz/code/deep-denoising/save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth
+train_name: SR_V2

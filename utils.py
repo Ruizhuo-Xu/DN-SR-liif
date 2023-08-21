@@ -2,11 +2,15 @@ import os
 import time
 import shutil
 import math
+import random
 
 import torch
 import numpy as np
 from torch.optim import SGD, Adam
+from torch.utils.data import Dataset, DataLoader
 from tensorboardX import SummaryWriter
+from torchvision import transforms
+from PIL import Image
 
 
 class Averager():
@@ -21,6 +25,25 @@ class Averager():
 
     def item(self):
         return self.v
+
+
+class Accuracy():
+
+    def __init__(self):
+        self.correct_num = 0
+        self.total_num = 0
+        self.acc = 0.0
+
+    def add(self, preds: torch.Tensor, labels: torch.Tensor):
+        assert preds.shape[0] == labels.shape[0]
+        correct_num = (preds == labels).sum().item()
+        total_num = preds.shape[0]
+        self.correct_num += correct_num
+        self.total_num += total_num
+        self.acc = self.correct_num / self.total_num
+
+    def item(self):
+        return self.acc
 
 
 class Timer():
@@ -76,6 +99,11 @@ def set_save_path(save_path, remove=True):
     writer = SummaryWriter(os.path.join(save_path, 'tensorboard'))
     return log, writer
 
+def set_save_path_(save_path, remove=True):
+    ensure_path(save_path, remove=remove)
+    set_log_path(save_path)
+    # writer = SummaryWriter(os.path.join(save_path, 'tensorboard'))
+    return log
 
 def compute_num_params(model, text=False):
     tot = int(sum([np.prod(p.shape) for p in model.parameters()]))
@@ -122,7 +150,7 @@ def to_pixel_samples(img):
         img: Tensor, (3, H, W)
     """
     coord = make_coord(img.shape[-2:])
-    rgb = img.view(3, -1).permute(1, 0)
+    rgb = img.view(img.shape[0], -1).permute(1, 0)
     return coord, rgb
 
 
@@ -186,3 +214,73 @@ def calc_normalMap(depth_map):
     normal *= 255
     # cv2.imwrite("normal.png", normal[:, :, ::-1])
     return normal[:,:,::-1].copy()
+
+
+def resize_fn(img, size):
+    return transforms.ToTensor()(
+        transforms.Resize(size, Image.BICUBIC)(
+            transforms.ToPILImage()(img)))
+
+
+def collect_fn(batch):
+    noisy_imgs = []
+    hr_coords, hr_gts, cells = [], [], []
+    # 同一个batch进行相同的降采样
+    s = random.uniform(1.0, 4.0)
+    for data in batch:
+        img_noisy, img_ori = data
+        # downsample
+        w_hr = img_ori.shape[-1]
+        w_lr = round(w_hr / s)
+        img_noisy_lr = resize_fn(img_noisy, w_lr)
+        hr_coord, hr_gt = to_pixel_samples(img_ori)
+        cell = torch.ones_like(hr_coord)
+        cell[:, 0] *= 2 / w_hr
+        cell[:, 1] *= 2 / w_hr
+        hr_coords.append(hr_coord)
+        hr_gts.append(hr_gt)
+        cells.append(cell)
+
+        noisy_imgs.append(img_noisy_lr)
+    noisy_imgs = torch.stack(noisy_imgs, dim=0)
+    hr_coords = torch.stack(hr_coords, dim=0)
+    hr_gts = torch.stack(hr_gts, dim=0)
+    cells = torch.stack(cells, dim=0)
+    return {
+        'inp': noisy_imgs,
+        'coord': hr_coords,
+        'cell': cells,
+        'gt': hr_gts,
+    }
+
+
+def calc_id_loss(pred, gt, model, id_loss_fn):
+    # pred: B C H W
+    # gt: B C H W
+    model.eval()
+    # with torch.no_grad():
+    pred_feat = model(pred, is_train=False)
+    gt_feat = model(gt, is_train=False)
+    id_loss = id_loss_fn(pred_feat, gt_feat)
+
+    return id_loss
+
+
+def extract_gallery_features(model, gallery):
+    imgs = []
+    labels = []
+    for data in gallery:
+        img = data['inp']
+        label = data['label']
+        imgs.append(img)
+        labels.append(label)
+    imgs = torch.stack(imgs, dim=0)
+    labels = torch.stack(labels, dim=0)
+    imgs = imgs.cuda()
+    labels = labels.cuda()
+    
+    # torch.set_grad_enabled(False)
+    model.eval()
+    with torch.no_grad():
+        gallery_features = model(imgs, is_train=False)
+    return gallery_features, labels

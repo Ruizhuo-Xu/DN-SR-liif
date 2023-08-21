@@ -51,6 +51,12 @@ class ImageFolder(Dataset):
 
         if self.cache == 'none':
             img = cv.imread(x)
+            if len(img.shape) == 3:
+                img = img[:, :, 0, None]
+            elif len(img.shape) == 2:
+                img = img[:, :, None]
+            else:
+                raise
             # if self.add_noise:
             img_noisy = add_noise_Guass(img, var=0.001)
             if self.augment:
@@ -62,10 +68,10 @@ class ImageFolder(Dataset):
                     # flip vertical
                     img = cv.flip(img, 0)
                     img_noisy = cv.flip(img_noisy, 0)
-            depth = img_noisy[:, :, 0]
-            normal = calc_normalMap(depth).astype(np.uint8)
+            # depth = img_noisy[:, :, 0]
+            # normal = calc_normalMap(depth).astype(np.uint8)
             # img = np.concatenate([depth[:, :, None], normal], axis=2)
-            img_noisy = np.concatenate([img_noisy, normal], axis=2)
+            # img_noisy = np.concatenate([img_noisy, normal], axis=2)
             # pdb.set_trace()
             # img = img[:,:,0]
             # img = np.stack([img, img, img], axis=2)
@@ -77,65 +83,78 @@ class ImageFolder(Dataset):
         elif self.cache == 'in_memory':
             return x
 
-# @register('image-folder')
-# class ImageFolder(Dataset):
 
-#     def __init__(self, root_path, split_file=None, split_key=None, first_k=None,
-#                  repeat=1, cache='none'):
-#         self.repeat = repeat
-#         self.cache = cache
+@register('lock3d-folder')
+class Lock3DFolder(Dataset):
 
-#         if split_file is None:
-#             filenames = sorted(os.listdir(root_path))
-#         else:
-#             with open(split_file, 'r') as f:
-#                 filenames = json.load(f)[split_key]
-#         if first_k is not None:
-#             filenames = filenames[:first_k]
+    def __init__(self, datafile: str, num2id=None, first_k: int=None, repeat: int=1,
+                 cache: str='none', data_norm=False, replace_str=None):
+        self.repeat = repeat
+        self.cache = cache
+        self.replace_str = replace_str
+        self.data_norm = data_norm
+        if num2id:
+            self.num2id = np.load(num2id, allow_pickle=True).item()
+        else:
+            self.num2id = None
+        if '.txt' in datafile:
+            file_paths = np.loadtxt(datafile, dtype=str).tolist()
+        elif '.npy' in datafile:
+            file_paths = np.load(datafile).tolist()
+        else:
+            raise "invalid datafile!!"
+        if first_k is not None:
+            file_paths = file_paths[:first_k]
+        self.files = []
+        if cache == "none":
+            self.files = file_paths
+        else:
+            for file_path in file_paths:
+                if cache == 'bin':
+                    raise NotImplementedError
 
-#         self.files = []
-#         for filename in filenames:
-#             file = os.path.join(root_path, filename)
+                elif cache == 'in_memory':
+                    self.files.append(transforms.ToTensor()(
+                        cv.imread(file_path, flags=cv.IMREAD_UNCHANGED)))
 
-#             if cache == 'none':
-#                 self.files.append(file)
+    def __len__(self):
+        return len(self.files)
 
-#             elif cache == 'bin':
-#                 bin_root = os.path.join(os.path.dirname(root_path),
-#                     '_bin_' + os.path.basename(root_path))
-#                 if not os.path.exists(bin_root):
-#                     os.mkdir(bin_root)
-#                     print('mkdir', bin_root)
-#                 bin_file = os.path.join(
-#                     bin_root, filename.split('.')[0] + '.pkl')
-#                 if not os.path.exists(bin_file):
-#                     with open(bin_file, 'wb') as f:
-#                         pickle.dump(imageio.imread(file), f)
-#                     print('dump', bin_file)
-#                 self.files.append(bin_file)
+    def __getitem__(self, idx):
+        x = self.files[idx]
+        if self.replace_str:
+            x = x.replace('1028_new', self.replace_str)
+        if self.num2id:
+            dir_name = x.split(sep='/')[-2]  # 不同系统可能有差异，注意
+            num = int(dir_name[:3])
+            label = self.num2id[num]
+            label = torch.tensor(label)
+            subsets = {'NU':0, 'FE': 1, 'PS':2, 'OC':3, 'TM':4}
+            basic_subset = subsets[dir_name.split('_')[-2]]  # //NU FE PS OC //TM
+            basic_subset = torch.tensor(basic_subset)
+            TM_subset = False
+            if num in list(self.num2id.keys())[-169:]:
+                TM_subset = True
+            TM_subset = torch.tensor(TM_subset)
+        else:
+            raise NotImplementedError
 
-#             elif cache == 'in_memory':
-#                 self.files.append(transforms.ToTensor()(
-#                     Image.open(file).convert('RGB')))
+        if self.cache == 'none':
+            img = cv.imread(x)[:, :, 0, None]
+            img = transforms.ToTensor()(img)
+            if self.data_norm:
+                img = (img - 0.5) / 0.5
 
-#     def __len__(self):
-#         return len(self.files) * self.repeat
+            return {'inp': img,
+                    'label': label,
+                    'basic_subset': basic_subset,
+                    'TM_subset': TM_subset}
+        
+        elif self.cache == 'bin':
+            raise NotImplementedError
 
-#     def __getitem__(self, idx):
-#         x = self.files[idx % len(self.files)]
-
-#         if self.cache == 'none':
-#             return transforms.ToTensor()(Image.open(x).convert('RGB'))
-
-#         elif self.cache == 'bin':
-#             with open(x, 'rb') as f:
-#                 x = pickle.load(f)
-#             x = np.ascontiguousarray(x.transpose(2, 0, 1))
-#             x = torch.from_numpy(x).float() / 255
-#             return x
-
-#         elif self.cache == 'in_memory':
-#             return x
+        elif self.cache == 'in_memory':
+            return x
 
 
 @register('paired-image-folders')

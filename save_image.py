@@ -40,14 +40,15 @@ if __name__ == '__main__':
     img_paths = glob(os.path.join(args.input, '*', '*', '*.png'))
     for img_path in tqdm(img_paths):
         img_depth = cv.imread(img_path)
-        img_normal = calc_normalMap(img_depth[:, :, 0]).astype(np.uint8)
-        img = np.concatenate([img_depth, img_normal], axis=-1)
+        img = img_depth[:, :, 0, None]
+        # img_normal = calc_normalMap(img_depth[:, :, 0]).astype(np.uint8)
+        # img = np.concatenate([img_depth, img_normal], axis=-1)
         img = transforms.ToTensor()(img)
         # pdb.set_trace()
         # img = transforms.ToTensor()(Image.open(img_path).convert('RGB'))
         pred = batched_predict(model, ((img - 0.5) / 0.5).cuda().unsqueeze(0),
             coord.unsqueeze(0), cell.unsqueeze(0), bsize=30000)[0]
-        pred = (pred * 0.5 + 0.5).clamp(0, 1).view(h, w, 3).permute(2, 0, 1).cpu()
+        pred = (pred * 0.5 + 0.5).clamp(0, 1).view(h, w, 1).permute(2, 0, 1).cpu()
         if 'lr' in img_path:
             save_path = img_path.replace('lr', args.replace)
         else:
