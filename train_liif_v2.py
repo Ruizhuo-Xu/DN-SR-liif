@@ -52,7 +52,7 @@ def make_data_loader(spec, tag=''):
 
     loader = DataLoader(dataset, batch_size=spec['batch_size'],
         shuffle=(tag == 'train'), num_workers=8, pin_memory=True,
-        collate_fn=utils.collect_fn)
+        collate_fn=utils.random_downsample(scale_min=spec['scale_min'], scale_max=spec['scale_max']))
     return loader
 
 
@@ -105,7 +105,8 @@ def get_id_model():
 def train(train_loader, model, optimizer, id_model=None):
     model.train()
     l1_loss_fn = nn.L1Loss()
-    id_loss_fn = nn.L1Loss()
+    id_loss_fn = utils.CosineSimilarityLoss()
+    # id_loss_fn = nn.L1Loss()
 
     l1_loss_avg = utils.Averager()
     id_loss_avg = utils.Averager()
@@ -131,7 +132,6 @@ def train(train_loader, model, optimizer, id_model=None):
         l1_loss = l1_loss_fn(pred, gt)
 
         bs, n_coords, channels = gt.shape
-        # pdb.set_trace()
         side = int(math.sqrt(n_coords))
         pred = pred.view(bs, side, side, channels).permute(0, 3, 1, 2)
         gt = gt.view(bs, side, side, channels).permute(0, 3, 1, 2)

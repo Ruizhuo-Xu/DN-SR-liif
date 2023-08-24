@@ -4,11 +4,14 @@ train_dataset:
     args:
       # root_path_1: datafiles/lock3dface_avg_train.txt
       datafile: datafiles/lock3dface_train.txt
+      num2id: datafiles/num2id_lock3d.npy
       augment: true
       repeat: 1
       # first_k: 220000
       # cache: none
   batch_size: 64
+  scale_min: 1.0
+  scale_max: 4.0
 
 val_dataset:
   dataset:
@@ -16,15 +19,18 @@ val_dataset:
     args:
       # root_path_1: datafiles/lock3dface_avg_test.txt
       datafile: datafiles/lock3dface_test.txt
+      num2id: datafiles/num2id_lock3d.npy
       augment: false
       # first_k: 10
       repeat: 1
       # cache: in_memory
   batch_size: 64
+  scale_min: 1.0
+  scale_max: 4.0
 
 data_norm:
-  inp: {sub: [0.5], div: [0.5]}
-  gt: {sub: [0.5], div: [0.5]}
+  inp: {sub: [0.0], div: [1.0]}
+  gt: {sub: [0.0], div: [1.0]}
 
 model:
   name: liif
@@ -45,7 +51,7 @@ model:
 
 # resume: 'save/lock3dface_ori_SR_4_8/epoch-last.pth'
 id_net: '/home/rz/code/deep-denoising/save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth'
-id_loss_weight: 0.01
+id_loss_weight: 1.0
 
 optimizer:
   name: adam

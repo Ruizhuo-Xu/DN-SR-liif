@@ -5,9 +5,11 @@ import math
 import random
 
 import torch
+from torch import nn
 import numpy as np
 from torch.optim import SGD, Adam
 from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
 from tensorboardX import SummaryWriter
 from torchvision import transforms
 from PIL import Image
@@ -222,36 +224,48 @@ def resize_fn(img, size):
             transforms.ToPILImage()(img)))
 
 
-def collect_fn(batch):
-    noisy_imgs = []
-    hr_coords, hr_gts, cells = [], [], []
-    # 同一个batch进行相同的降采样
-    s = random.uniform(1.0, 4.0)
-    for data in batch:
-        img_noisy, img_ori = data
-        # downsample
-        w_hr = img_ori.shape[-1]
-        w_lr = round(w_hr / s)
-        img_noisy_lr = resize_fn(img_noisy, w_lr)
-        hr_coord, hr_gt = to_pixel_samples(img_ori)
-        cell = torch.ones_like(hr_coord)
-        cell[:, 0] *= 2 / w_hr
-        cell[:, 1] *= 2 / w_hr
-        hr_coords.append(hr_coord)
-        hr_gts.append(hr_gt)
-        cells.append(cell)
+def random_downsample(scale_min=1.0, scale_max=4.0):
+    assert scale_min > 0 and scale_max > 0 and scale_max >= scale_min
+    def collect_fn(batch):
+        noisy_imgs, labels, basic_subsets, TM_subsets = [], [], [], []
+        hr_coords, hr_gts, cells = [], [], []
+        # 同一个batch进行相同的降采样
+        s = random.uniform(scale_min, scale_max)
+        for data in batch:
+            img_noisy, img_ori, label, basic_subset, TM_subset = data
+            labels.append(label)
+            basic_subsets.append(basic_subset)
+            TM_subsets.append(TM_subset)
+            # downsample
+            w_hr = img_ori.shape[-1]
+            w_lr = round(w_hr / s)
+            img_noisy_lr = resize_fn(img_noisy, w_lr)
+            hr_coord, hr_gt = to_pixel_samples(img_ori)
+            cell = torch.ones_like(hr_coord)
+            cell[:, 0] *= 2 / w_hr
+            cell[:, 1] *= 2 / w_hr
+            hr_coords.append(hr_coord)
+            hr_gts.append(hr_gt)
+            cells.append(cell)
 
-        noisy_imgs.append(img_noisy_lr)
-    noisy_imgs = torch.stack(noisy_imgs, dim=0)
-    hr_coords = torch.stack(hr_coords, dim=0)
-    hr_gts = torch.stack(hr_gts, dim=0)
-    cells = torch.stack(cells, dim=0)
-    return {
-        'inp': noisy_imgs,
-        'coord': hr_coords,
-        'cell': cells,
-        'gt': hr_gts,
-    }
+            noisy_imgs.append(img_noisy_lr)
+        noisy_imgs = torch.stack(noisy_imgs, dim=0)
+        hr_coords = torch.stack(hr_coords, dim=0)
+        hr_gts = torch.stack(hr_gts, dim=0)
+        cells = torch.stack(cells, dim=0)
+        labels = torch.stack(labels, dim=0)
+        basic_subsets = torch.stack(basic_subsets, dim=0)
+        TM_subsets = torch.stack(TM_subsets, dim=0)
+        return {
+            'inp': noisy_imgs,
+            'coord': hr_coords,
+            'cell': cells,
+            'gt': hr_gts,
+            'label': labels,
+            'basic_subset': basic_subsets,
+            'TM_subset': TM_subsets
+        }
+    return collect_fn
 
 
 def calc_id_loss(pred, gt, model, id_loss_fn):
@@ -284,3 +298,20 @@ def extract_gallery_features(model, gallery):
     with torch.no_grad():
         gallery_features = model(imgs, is_train=False)
     return gallery_features, labels
+
+    
+class CosineSimilarityLoss(nn.Module):
+    def __init__(self, reduction='mean'):
+        super(CosineSimilarityLoss, self).__init__()
+        self.reduction = reduction
+
+    def forward(self, x1, x2):
+        cosine_sim = F.cosine_similarity(x1, x2)
+        loss = 1 - cosine_sim
+
+        if self.reduction == 'mean':
+            loss = torch.mean(loss)
+        elif self.reduction == 'sum':
+            loss = torch.sum(loss)
+
+        return loss

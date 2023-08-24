@@ -59,12 +59,12 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
 
     if eval_type is None:
         metric_fn = utils.calc_psnr
-    elif eval_type.startswith('div2k'):
-        scale = int(eval_type.split('-')[1])
-        metric_fn = partial(utils.calc_psnr, dataset='div2k', scale=scale)
-    elif eval_type.startswith('benchmark'):
-        scale = int(eval_type.split('-')[1])
-        metric_fn = partial(utils.calc_psnr, dataset='benchmark', scale=scale)
+    # elif eval_type.startswith('div2k'):
+    #     scale = int(eval_type.split('-')[1])
+    #     metric_fn = partial(utils.calc_psnr, dataset='div2k', scale=scale)
+    # elif eval_type.startswith('benchmark'):
+    #     scale = int(eval_type.split('-')[1])
+    #     metric_fn = partial(utils.calc_psnr, dataset='benchmark', scale=scale)
     else:
         raise NotImplementedError
 
@@ -85,14 +85,14 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
         pred = pred * gt_div + gt_sub
         pred.clamp_(0, 1)
 
-        if eval_type is not None: # reshape for shaving-eval
-            ih, iw = batch['inp'].shape[-2:]
-            s = math.sqrt(batch['coord'].shape[1] / (ih * iw))
-            shape = [batch['inp'].shape[0], round(ih * s), round(iw * s), 3]
-            pred = pred.view(*shape) \
-                .permute(0, 3, 1, 2).contiguous()
-            batch['gt'] = batch['gt'].view(*shape) \
-                .permute(0, 3, 1, 2).contiguous()
+        # if eval_type is not None: # reshape for shaving-eval
+        #     ih, iw = batch['inp'].shape[-2:]
+        #     s = math.sqrt(batch['coord'].shape[1] / (ih * iw))
+        #     shape = [batch['inp'].shape[0], round(ih * s), round(iw * s), 3]
+        #     pred = pred.view(*shape) \
+        #         .permute(0, 3, 1, 2).contiguous()
+        #     batch['gt'] = batch['gt'].view(*shape) \
+        #         .permute(0, 3, 1, 2).contiguous()
 
         res = metric_fn(pred, batch['gt'])
         val_res.add(res.item(), inp.shape[0])
@@ -101,6 +101,40 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
             pbar.set_description('val {:.4f}'.format(val_res.item()))
 
     return val_res.item()
+
+
+def calc_batch_acc(batch, model, gallery_feats, gallery_labels,
+                   total_acc, subset_acc, is_lock3dface=True):
+        # inp = (batch['inp'] - inp_sub) / inp_div
+        inp = batch['inp']
+        label = batch['label']
+        basic_subsets = batch.get('basic_subset', None)
+        TM_subsets = batch.get('TM_subset', None)
+        # basic_subsets = batch['basic_subset']
+        # TM_subsets = batch['TM_subset']
+        with torch.no_grad():
+            probe_feats = model(inp, is_train=False)
+            norm_probe_feats = F.normalize(probe_feats, p=2, dim=-1)
+            norm_gallery_feats = F.normalize(gallery_feats, p=2, dim=-1)
+            sim = torch.matmul(norm_probe_feats, norm_gallery_feats.T)
+            idx = torch.argmax(sim, dim=1)
+            preds = gallery_labels[idx]
+            # shape
+            total_acc.add(preds, label)
+            if is_lock3dface:
+                for i, (k, v) in enumerate(subset_acc.items()):
+                    if TM_subsets.all():
+                        break
+                    if k == 'TM':
+                        continue
+                    if not (basic_subsets == i).any():
+                        continue
+                    index_tensor = (basic_subsets == i) & (~TM_subsets)
+                    if index_tensor.any():
+                        v.add(preds[index_tensor], label[index_tensor])
+                if TM_subsets.any():
+                    subset_acc['TM'].add(preds[TM_subsets], label[TM_subsets])
+                    
 
 
 def eval_acc(loader, model, gallery, data_norm=None, is_lock3dface=True,
@@ -139,40 +173,78 @@ def eval_acc(loader, model, gallery, data_norm=None, is_lock3dface=True,
             else:
                 batch[k] = v.cuda()
 
-        inp = (batch['inp'] - inp_sub) / inp_div
-        label = batch['label']
-        basic_subsets = batch.get('basic_subset', None)
-        TM_subsets = batch.get('TM_subset', None)
-        # basic_subsets = batch['basic_subset']
-        # TM_subsets = batch['TM_subset']
-        with torch.no_grad():
-            probe_feats = model(inp, is_train=False)
-            norm_probe_feats = F.normalize(probe_feats, p=2, dim=-1)
-            norm_gallery_feats = F.normalize(gallery_feats, p=2, dim=-1)
-            sim = torch.matmul(norm_probe_feats, norm_gallery_feats.T)
-            idx = torch.argmax(sim, dim=1)
-            preds = gallery_labels[idx]
-            # shape
-            total_acc.add(preds, label)
-            if is_lock3dface:
-                for i, (k, v) in enumerate(subset_acc.items()):
-                    if TM_subsets.all():
-                        break
-                    if k == 'TM':
-                        continue
-                    if not (basic_subsets == i).any():
-                        continue
-                    index_tensor = (basic_subsets == i) & (~TM_subsets)
-                    if index_tensor.any():
-                        v.add(preds[index_tensor], label[index_tensor])
-                if TM_subsets.any():
-                    subset_acc['TM'].add(preds[TM_subsets], label[TM_subsets])
+        calc_batch_acc(batch, model, gallery_feats, gallery_labels,
+                       total_acc, subset_acc, is_lock3dface)
                     
         if verbose:
             pbar.set_description('val {:.4f}'.format(total_acc.item()))
 
         torch.cuda.empty_cache()
     return total_acc, subset_acc
+
+
+def eval(loader, SR_model, ID_model, gallery, data_norm=None,
+         is_lock3dface=True, verbose=False):
+    SR_model.eval()
+    ID_model.eval()
+
+    if data_norm is None:
+        data_norm = {
+            'inp': {'sub': [0], 'div': [1]},
+            'gt': {'sub': [0], 'div': [1]}
+        }
+    t = data_norm['inp']
+    inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).cuda()
+    inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).cuda()
+    t = data_norm['gt']
+    gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
+    gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
+
+    psnr_fn = utils.calc_psnr
+
+    psnr_res = utils.Averager()
+    total_acc = utils.Accuracy()
+    subset_acc = {
+        'NU': utils.Accuracy(),
+        'FE': utils.Accuracy(),
+        'PS': utils.Accuracy(),
+        'OC': utils.Accuracy(),
+        'TM': utils.Accuracy(),
+    }
+    gallery_feats, gallery_labels = \
+        utils.extract_gallery_features(ID_model, gallery)
+
+    pbar = tqdm(loader, leave=False, desc='val')
+    for batch in pbar:
+        for k, v in batch.items():
+            batch[k] = v.cuda()
+
+        inp = (batch['inp'] - inp_sub) / inp_div
+        with torch.no_grad():
+            pred = SR_model(inp, batch['coord'], batch['cell'])
+        pred = pred * gt_div + gt_sub
+        pred.clamp_(0, 1)
+        res = psnr_fn(pred, batch['gt'])
+        psnr_res.add(res.item(), inp.shape[0])
+
+        bs, n_coords, channels = pred.shape
+        side = int(math.sqrt(n_coords))
+        pred = pred.view(bs, side, side, channels).permute(0, 3, 1, 2)
+        ID_inp = {
+            'inp': pred,
+            'label': batch['label'],
+            'basic_subset': batch.get('basic_subset', None),
+            'TM_subset': batch.get('TM_subset', None)
+        }
+        calc_batch_acc(ID_inp, ID_model, gallery_feats, gallery_labels,
+                       total_acc, subset_acc, is_lock3dface)
+
+        if verbose:
+            pbar.set_description('val_psnr {:.4f}'.format(psnr_res.item()))
+            # pbar.set_description('val_total_acc {:.4f}'.format(psnr_res.item()))
+            # pbar.set_description('val {:.4f}'.format(psnr_res.item()))
+
+    return psnr_res, total_acc, subset_acc
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -186,18 +258,33 @@ if __name__ == '__main__':
     with open(args.config, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
-    spec = config['test_dataset']
+    spec = config['val_dataset']
     dataset = datasets.make(spec['dataset'])
-    dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
+    # dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
     loader = DataLoader(dataset, batch_size=spec['batch_size'],
-        num_workers=8, pin_memory=True)
+        shuffle=False, num_workers=8, pin_memory=True,
+        collate_fn=utils.random_downsample(scale_min=spec['scale_min'], scale_max=spec['scale_max']))
+    gallery = datasets.make(config['gallery'])
 
-    model_spec = torch.load(args.model)['model']
-    model = models.make(model_spec, load_sd=True).cuda()
+    sr_model_spec = torch.load(args.model)['model']
+    sr_model = models.make(sr_model_spec, load_sd=True).cuda()
+    id_model_spec = torch.load(config['id_net'])
+    id_model = models.make(id_model_spec['model'], load_sd=True).cuda()
 
-    res = eval_psnr(loader, model,
-        data_norm=config.get('data_norm'),
-        eval_type=config.get('eval_type'),
-        eval_bsize=config.get('eval_bsize'),
-        verbose=True)
-    print('result: {:.4f}'.format(res))
+    is_lock3dface = config.get('is_lock3dface', True)
+    psnr, total_acc, subset_acc = eval(loader, sr_model, id_model, gallery,
+                                       data_norm=config.get('data_norm'),
+                                       is_lock3dface=is_lock3dface,
+                                       verbose=True)
+    # psnr = eval_psnr(loader, model,
+    #     data_norm=config.get('data_norm'),
+    #     eval_type=config.get('eval_type'),
+    #     eval_bsize=config.get('eval_bsize'),
+    #     verbose=True)
+    print('psnr: {:.4f}'.format(psnr.item()))
+    print('total_acc: {:.4f}'.format(total_acc.item()))
+    if is_lock3dface:
+        for key, value in subset_acc.items():
+            print('subset_acc_{}: {:.4f}'.format(key, value.item()))
+
+    

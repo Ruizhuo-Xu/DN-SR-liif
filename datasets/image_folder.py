@@ -18,11 +18,15 @@ from utils import add_noise_Guass, calc_normalMap
 class ImageFolder(Dataset):
 
     def __init__(self, datafile: str, first_k: int=None, repeat: int=1,
-                 cache: str='none', augment=True):
+                 cache: str='none', augment=True, num2id=None):
         self.repeat = repeat
         self.cache = cache
         # self.add_noise = add_noise
         self.augment = augment
+        if num2id:
+            self.num2id = np.load(num2id, allow_pickle=True).item()
+        else:
+            self.num2id = None
         if '.txt' in datafile:
             file_paths = np.loadtxt(datafile, dtype=str).tolist()
         elif '.npy' in datafile:
@@ -48,6 +52,21 @@ class ImageFolder(Dataset):
 
     def __getitem__(self, idx):
         x = self.files[idx % len(self.files)]
+
+        if self.num2id:
+            dir_name = x.split(sep='/')[-2]  # 不同系统可能有差异，注意
+            num = int(dir_name[:3])
+            label = self.num2id[num]
+            label = torch.tensor(label)
+            subsets = {'NU':0, 'FE': 1, 'PS':2, 'OC':3, 'TM':4}
+            basic_subset = subsets[dir_name.split('_')[-2]]  # //NU FE PS OC //TM
+            basic_subset = torch.tensor(basic_subset)
+            TM_subset = False
+            if num in list(self.num2id.keys())[-169:]:
+                TM_subset = True
+            TM_subset = torch.tensor(TM_subset)
+        else:
+            raise NotImplementedError
 
         if self.cache == 'none':
             img = cv.imread(x)
@@ -76,7 +95,8 @@ class ImageFolder(Dataset):
             # img = img[:,:,0]
             # img = np.stack([img, img, img], axis=2)
             # (6, H, W), (3, H, W)
-            return transforms.ToTensor()(img_noisy), transforms.ToTensor()(img)
+            return (transforms.ToTensor()(img_noisy), transforms.ToTensor()(img),
+                    label, basic_subset, TM_subset)
         elif self.cache == 'bin':
             raise NotImplementedError
 
