@@ -38,6 +38,25 @@ import models
 import utils
 from test import eval_psnr
 
+# defines two global scope variables to store our gradients and activations 
+gradients = None 
+activations = None 
+
+def backward_hook(module, grad_input, grad_output): 
+    global gradients # refers to the variable in the global scope 
+    # print('Backward hook running...') 
+    gradients = grad_output 
+    # In this case, we expect it to be torch.Size([batch size, 1024, 8, 8]) 
+    # print(f'Gradients size: {gradients[0].size()}')  
+    # We need the 0 index because the tensor containing the gradients comes 
+    # inside a one element tuple. 
+
+def forward_hook(module, args, output): 
+    global activations # refers to the variable in the global scope 
+    # print('Forward hook running...') 
+    activations = output 
+    # In this case, we expect it to be torch.Size([batch size, 1024, 8, 8]) 
+    # print(f'Activations size: {activations.size()}')
 
 def make_data_loader(spec, tag=''):
     if spec is None:
@@ -104,7 +123,7 @@ def get_id_model():
 
 def train(train_loader, model, optimizer, id_model=None):
     model.train()
-    l1_loss_fn = nn.L1Loss()
+    l1_loss_fn = utils.WeightedL1Loss((128, 128))
     id_loss_fn = utils.CosineSimilarityLoss()
     # id_loss_fn = nn.L1Loss()
 
@@ -129,27 +148,36 @@ def train(train_loader, model, optimizer, id_model=None):
         pred = model(inp, batch['coord'], batch['cell'])
 
         gt = (batch['gt'] - gt_sub) / gt_div
-        l1_loss = l1_loss_fn(pred, gt)
 
         bs, n_coords, channels = gt.shape
         side = int(math.sqrt(n_coords))
         pred = pred.view(bs, side, side, channels).permute(0, 3, 1, 2)
         gt = gt.view(bs, side, side, channels).permute(0, 3, 1, 2)
 
+        optimizer.zero_grad()
         if id_model:
-            id_loss = utils.calc_id_loss(pred, gt, id_model, id_loss_fn)
+            id_loss_weight = config.get('id_loss_weight', 0)
+            _backward_hook = id_model.block5.register_full_backward_hook(backward_hook) 
+            _forward_hook = id_model.block5.register_forward_hook(forward_hook)
+            id_loss = id_loss_weight * utils.calc_id_loss(pred, gt, id_model, id_loss_fn)
+            # 先backward计算L1 Loss权重
+            id_loss.backward(retain_graph=True)
+            heatmap = utils.grad_cam_heatmap(gradients[0], activations)
+            _backward_hook.remove()
+            _forward_hook.remove()
         else:
             id_loss = torch.Tensor([0]).cuda()
+            heatmap = None
 
-        id_loss_weight = config.get('id_loss_weight', 0)
-        loss = l1_loss + id_loss_weight * id_loss
+        l1_loss = l1_loss_fn(pred, gt, heatmap)
+        loss = l1_loss + id_loss
 
         l1_loss_avg.add(l1_loss.item())
         id_loss_avg.add(id_loss.item())
         train_loss.add(loss.item())
 
-        optimizer.zero_grad()
-        loss.backward()
+        l1_loss.backward()
+        # pdb.set_trace()
         optimizer.step()
 
         pred = None; loss = None;

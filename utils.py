@@ -3,6 +3,7 @@ import time
 import shutil
 import math
 import random
+import pdb
 
 import torch
 from torch import nn
@@ -315,3 +316,46 @@ class CosineSimilarityLoss(nn.Module):
             loss = torch.sum(loss)
 
         return loss
+
+
+def grad_cam_heatmap(gradients, activations):
+    pooled_gradients = torch.mean(gradients, dim=[2, 3], keepdim=True)
+    # pooled_gradients = pooled_gradients[:, :, None, None]
+    weighted_act = activations * pooled_gradients
+    # average the channels of the activations 
+    heatmap = torch.mean(weighted_act, dim=1, keepdim=True) 
+
+    # relu on top of the heatmap 
+    heatmap = F.relu(heatmap) 
+
+    # normalize the heatmap 
+    heatmap /= torch.max(heatmap) 
+    return heatmap
+
+
+
+class WeightedL1Loss(nn.Module):
+    def __init__(self, size=(128, 128)):
+        super(WeightedL1Loss, self).__init__()
+        self.size = size
+
+    def forward(self, output, target, heatmap=None):
+        if heatmap is not None:
+            heatmap = F.interpolate(heatmap, self.size,
+                                    mode='bilinear', align_corners=False)
+            heatmap = F.softmax(heatmap.view(heatmap.shape[0], -1), dim=1)
+            heatmap = heatmap.view(-1, 1, *self.size)
+            out = torch.abs(output - target) * heatmap
+            return out.sum()
+        else:
+            out = torch.abs(output - target)
+            return out.mean()
+
+
+def setup_seed(seed):
+     torch.manual_seed(seed)
+     torch.cuda.manual_seed_all(seed)
+     np.random.seed(seed)
+     random.seed(seed)
+     os.environ['PYTHONHASHSEED'] = str(seed)  # 为了禁止hash随机化，使得实验可复现。
+     torch.backends.cudnn.deterministic = True

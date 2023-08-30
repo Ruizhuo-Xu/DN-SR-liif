@@ -185,7 +185,10 @@ def eval_acc(loader, model, gallery, data_norm=None, is_lock3dface=True,
 
 def eval(loader, SR_model, ID_model, gallery, data_norm=None,
          is_lock3dface=True, verbose=False):
-    SR_model.eval()
+    if SR_model is not None:
+        SR_model.eval()
+    else:
+        SR_model = resize_images((128, 128), mode='bicubic')
     ID_model.eval()
 
     if data_norm is None:
@@ -246,14 +249,26 @@ def eval(loader, SR_model, ID_model, gallery, data_norm=None,
 
     return psnr_res, total_acc, subset_acc
 
+
+def resize_images(size, mode='bilinear'):
+    def resize(images, *args, **kwargs):
+        resized_images = F.interpolate(images, size=size,
+                                    mode=mode, align_corners=False)
+        B, C, H, W = resized_images.shape
+        return resized_images.reshape(B, C, H * W).permute(0, 2, 1)
+    return resize
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config')
-    parser.add_argument('--model')
+    parser.add_argument('--model', default=None)
     parser.add_argument('--gpu', default='0')
     args = parser.parse_args()
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    # fix seed
+    utils.setup_seed(42)
 
     with open(args.config, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
@@ -266,8 +281,11 @@ if __name__ == '__main__':
         collate_fn=utils.random_downsample(scale_min=spec['scale_min'], scale_max=spec['scale_max']))
     gallery = datasets.make(config['gallery'])
 
-    sr_model_spec = torch.load(args.model)['model']
-    sr_model = models.make(sr_model_spec, load_sd=True).cuda()
+    if args.model is not None:
+        sr_model_spec = torch.load(args.model)['model']
+        sr_model = models.make(sr_model_spec, load_sd=True).cuda()
+    else:
+        sr_model = None
     id_model_spec = torch.load(config['id_net'])
     id_model = models.make(id_model_spec['model'], load_sd=True).cuda()
 
@@ -276,15 +294,24 @@ if __name__ == '__main__':
                                        data_norm=config.get('data_norm'),
                                        is_lock3dface=is_lock3dface,
                                        verbose=True)
-    # psnr = eval_psnr(loader, model,
-    #     data_norm=config.get('data_norm'),
-    #     eval_type=config.get('eval_type'),
-    #     eval_bsize=config.get('eval_bsize'),
-    #     verbose=True)
+
     print('psnr: {:.4f}'.format(psnr.item()))
     print('total_acc: {:.4f}'.format(total_acc.item()))
     if is_lock3dface:
         for key, value in subset_acc.items():
             print('subset_acc_{}: {:.4f}'.format(key, value.item()))
 
+   # Save results to a text file
+    if args.model is not None:
+        save_dir = os.path.dirname(args.model)
+    else:
+        save_dir = './save/resize_results'
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+    with open(os.path.join(save_dir, 'test_results.txt'), 'w') as f:
+       f.write('psnr: {:.4f}\n'.format(psnr.item()))
+       f.write('total_acc: {:.4f}\n'.format(total_acc.item()))
+       if is_lock3dface:
+           for key, value in subset_acc.items():
+               f.write('subset_acc_{}: {:.4f}\n'.format(key, value.item()))
     

@@ -12,13 +12,13 @@ val_dataset:
   dataset:
     name: image-folder
     args:
-      datafile: datafiles/lock3dface_test.txt
+      datafile: datafiles/test_lock3dface.txt
       num2id: datafiles/num2id_lock3d.npy
       augment: false
       repeat: 1
-  batch_size: 64
+  batch_size: 1
   scale_min: 1.0
-  scale_max: 4.0
+  scale_max: 8.0
 
 gallery:
   name: lock3d-folder
@@ -27,10 +27,9 @@ gallery:
     num2id: datafiles/num2id_lock3d.npy
     repeat: 1
 
-data_norm:
-  inp: {sub: [0.5], div: [0.5]}
-  gt: {sub: [0.5], div: [0.5]}
+# data_norm:
+#   inp: {sub: [0.5], div: [0.5]}
+#   gt: {sub: [0.5], div: [0.5]}
 
 is_lock3dface: true
 id_net: /home/rz/code/deep-denoising/save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth
-train_name: SR_V2_ID1.0COS

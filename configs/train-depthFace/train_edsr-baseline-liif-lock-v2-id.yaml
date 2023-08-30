@@ -11,7 +11,7 @@ train_dataset:
       # cache: none
   batch_size: 64
   scale_min: 1.0
-  scale_max: 4.0
+  scale_max: 8.0
 
 val_dataset:
   dataset:
@@ -26,7 +26,7 @@ val_dataset:
       # cache: in_memory
   batch_size: 64
   scale_min: 1.0
-  scale_max: 4.0
+  scale_max: 8.0
 
 data_norm:
   inp: {sub: [0.0], div: [1.0]}
@@ -49,7 +49,6 @@ model:
     feat_unfold: False
     cell_decode: False
 
-# resume: 'save/lock3dface_ori_SR_4_8/epoch-last.pth'
 id_net: '/home/rz/code/deep-denoising/save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth'
 id_loss_weight: 1.0
 
