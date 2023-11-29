@@ -12,7 +12,7 @@ val_dataset:
   dataset:
     name: image-folder
     args:
-      datafile: datafiles/test_lock3dface.txt
+      datafile: datafiles/lock3dface_test_smplify.txt
       num2id: datafiles/num2id_lock3d.npy
       augment: false
       repeat: 1
@@ -32,4 +32,4 @@ gallery:
 #   gt: {sub: [0.5], div: [0.5]}
 
 is_lock3dface: true
-id_net: /home/rz/code/deep-denoising/save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth
+id_net: save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth

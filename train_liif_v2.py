@@ -1,26 +1,3 @@
-""" Train for generating LIIF, from image to implicit representation.
-
-    Config:
-        train_dataset:
-          dataset: $spec; wrapper: $spec; batch_size:
-        val_dataset:
-          dataset: $spec; wrapper: $spec; batch_size:
-        (data_norm):
-            inp: {sub: []; div: []}
-            gt: {sub: []; div: []}
-        (eval_type):
-        (eval_bsize):
-
-        model: $spec
-        optimizer: $spec
-        epoch_max:
-        (multi_step_lr):
-            milestones: []; gamma: 0.5
-        (resume): *.pth
-
-        (epoch_val): ; (epoch_save):
-"""
-
 import argparse
 import os
 import math
@@ -31,7 +8,16 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+import random
+import wandb
+
+import numpy as np
 from torch.optim.lr_scheduler import MultiStepLR
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
 
 import datasets
 import models
@@ -42,36 +28,52 @@ from test import eval_psnr
 gradients = None 
 activations = None 
 
+def setup_seed(seed):
+     torch.manual_seed(seed)
+     torch.cuda.manual_seed_all(seed)
+     np.random.seed(seed)
+     random.seed(seed)
+     os.environ['PYTHONHASHSEED'] = str(seed)  # 为了禁止hash随机化，使得实验可复现。
+     torch.backends.cudnn.deterministic = True
+
+def ddp_setup(rank, world_size, port='12355'):
+    """
+    Args:
+        rank: Unique identifier of each process
+        world_size: Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = port
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def ddp_reduce(x):
+    res  = torch.tensor(x).cuda()
+    dist.reduce(res, 0)
+    return res.item()
+
 def backward_hook(module, grad_input, grad_output): 
     global gradients # refers to the variable in the global scope 
-    # print('Backward hook running...') 
     gradients = grad_output 
-    # In this case, we expect it to be torch.Size([batch size, 1024, 8, 8]) 
-    # print(f'Gradients size: {gradients[0].size()}')  
-    # We need the 0 index because the tensor containing the gradients comes 
-    # inside a one element tuple. 
 
 def forward_hook(module, args, output): 
     global activations # refers to the variable in the global scope 
-    # print('Forward hook running...') 
     activations = output 
-    # In this case, we expect it to be torch.Size([batch size, 1024, 8, 8]) 
-    # print(f'Activations size: {activations.size()}')
 
 def make_data_loader(spec, tag=''):
     if spec is None:
         return None
 
     dataset = datasets.make(spec['dataset'])
-    # dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
-
-    # log('{} dataset: size={}'.format(tag, len(dataset)))
-    # for k, v in dataset[0].items():
-    #     log('  {}: shape={}'.format(k, tuple(v.shape)))
-
-    loader = DataLoader(dataset, batch_size=spec['batch_size'],
-        shuffle=(tag == 'train'), num_workers=8, pin_memory=True,
-        collate_fn=utils.random_downsample(scale_min=spec['scale_min'], scale_max=spec['scale_max']))
+    loader = DataLoader(
+        dataset,
+        batch_size=spec['batch_size'],
+        shuffle=False,
+        num_workers=spec.get('num_workers', 0),
+        pin_memory=True,
+        collate_fn=utils.RandomDwonSample(scale_min=spec['scale_min'], scale_max=spec['scale_max']),
+        sampler=DistributedSampler(dataset, shuffle=(tag=='train'))
+    )
     return loader
 
 
@@ -104,7 +106,8 @@ def prepare_training():
         else:
             lr_scheduler = MultiStepLR(optimizer, **config['multi_step_lr'])
 
-    log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
+    if dist.get_rank() == 0:
+        log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
     return model, optimizer, epoch_start, lr_scheduler
 
 
@@ -115,7 +118,8 @@ def get_id_model():
         # 冻结识别网络参数
         for name, parameter in model.named_parameters():
             parameter.requires_grad = False
-        log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
+        if dist.get_rank() == 0:
+            log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
         return model
     else:
         return None
@@ -139,58 +143,65 @@ def train(train_loader, model, optimizer, id_model=None):
     gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
     gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
 
-    for batch in tqdm(train_loader, leave=False, desc='train'):
-        for k, v in batch.items():
-            batch[k] = v.cuda()
+    with tqdm(train_loader, leave=False, desc='train', ascii=True) as t:
+        for iter_step, batch in enumerate(t, 1):
+            for k, v in batch.items():
+                batch[k] = v.cuda()
 
-        inp = (batch['inp'] - inp_sub) / inp_div
-        # B, N, C
-        pred = model(inp, batch['coord'], batch['cell'])
+            inp = (batch['inp'] - inp_sub) / inp_div
+            # B, N, C
+            pred = model(inp, batch['coord'], batch['cell'])
 
-        gt = (batch['gt'] - gt_sub) / gt_div
+            gt = (batch['gt'] - gt_sub) / gt_div
 
-        bs, n_coords, channels = gt.shape
-        side = int(math.sqrt(n_coords))
-        pred = pred.view(bs, side, side, channels).permute(0, 3, 1, 2)
-        gt = gt.view(bs, side, side, channels).permute(0, 3, 1, 2)
+            bs, n_coords, channels = gt.shape
+            side = int(math.sqrt(n_coords))
+            pred = pred.view(bs, side, side, channels).permute(0, 3, 1, 2)
+            gt = gt.view(bs, side, side, channels).permute(0, 3, 1, 2)
 
-        optimizer.zero_grad()
-        if id_model:
-            id_loss_weight = config.get('id_loss_weight', 0)
-            _backward_hook = id_model.block5.register_full_backward_hook(backward_hook) 
-            _forward_hook = id_model.block5.register_forward_hook(forward_hook)
-            id_loss = id_loss_weight * utils.calc_id_loss(pred, gt, id_model, id_loss_fn)
-            # 先backward计算L1 Loss权重
-            id_loss.backward(retain_graph=True)
-            heatmap = utils.grad_cam_heatmap(gradients[0], activations)
-            _backward_hook.remove()
-            _forward_hook.remove()
-        else:
-            id_loss = torch.Tensor([0]).cuda()
-            heatmap = None
+            optimizer.zero_grad()
+            if id_model:
+                id_loss_weight = config.get('id_loss_weight', 0)
+                _backward_hook = id_model.block5.register_full_backward_hook(backward_hook) 
+                _forward_hook = id_model.block5.register_forward_hook(forward_hook)
+                id_loss = id_loss_weight * utils.calc_id_loss(pred, gt, id_model, id_loss_fn)
+                # 先backward计算L1 Loss权重
+                id_loss.backward(retain_graph=True)
+                heatmap = utils.grad_cam_heatmap(gradients[0], activations)
+                _backward_hook.remove()
+                _forward_hook.remove()
+            else:
+                id_loss = torch.Tensor([0]).cuda()
+                heatmap = None
 
-        l1_loss = l1_loss_fn(pred, gt, heatmap)
-        loss = l1_loss + id_loss
+            l1_loss = l1_loss_fn(pred, gt, heatmap)
+            loss = l1_loss + id_loss
 
-        l1_loss_avg.add(l1_loss.item())
-        id_loss_avg.add(id_loss.item())
-        train_loss.add(loss.item())
+            l1_loss_avg.add(l1_loss.item())
+            id_loss_avg.add(id_loss.item())
+            train_loss.add(loss.item())
 
-        l1_loss.backward()
-        # pdb.set_trace()
-        optimizer.step()
+            l1_loss.backward()
+            # pdb.set_trace()
+            optimizer.step()
 
-        pred = None; loss = None;
+            pred = None; loss = None;
 
-    return l1_loss_avg.item(), id_loss_avg.item(), train_loss.item()
+    return l1_loss_avg, id_loss_avg, train_loss
 
 
-def main(config_, save_path):
-    global config, log, writer
+def main(rank, world_size, config_, save_path, args):
+    global config, log
+    ddp_setup(rank, world_size, args.port)
     config = config_
-    log, writer = utils.set_save_path(save_path)
-    with open(os.path.join(save_path, 'config.yaml'), 'w') as f:
-        yaml.dump(config, f, sort_keys=False)
+    if rank == 0:
+        save_name = save_path.split('/')[-1]
+        wandb.init(project='liif-sr', name=save_name)
+        log = utils.set_save_path(save_path)
+        with open(os.path.join(save_path, 'config.yaml'), 'w') as f:
+            yaml.dump(config, f, sort_keys=False)
+    dist.barrier()
+    torch.cuda.set_device(rank)
 
     train_loader, val_loader = make_data_loaders()
     if config.get('data_norm') is None:
@@ -200,11 +211,10 @@ def main(config_, save_path):
         }
 
     model, optimizer, epoch_start, lr_scheduler = prepare_training()
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     id_model = get_id_model()
-
-    n_gpus = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
-    if n_gpus > 1:
-        model = nn.parallel.DataParallel(model)
+    if id_model:
+        id_model = DDP(id_model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
 
     epoch_max = config['epoch_max']
     epoch_val = config.get('epoch_val')
@@ -217,25 +227,40 @@ def main(config_, save_path):
         t_epoch_start = timer.t()
         log_info = ['epoch {}/{}'.format(epoch, epoch_max)]
 
-        writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+        # writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
 
         l1_loss, id_loss, train_loss = train(train_loader, model, optimizer, id_model)
+        l1_v = ddp_reduce(l1_loss.v)
+        l1_n = ddp_reduce(l1_loss.n)
+        id_v = ddp_reduce(id_loss.v)
+        id_n = ddp_reduce(id_loss.n)
+        train_v = ddp_reduce(train_loss.v)
+        train_n = ddp_reduce(train_loss.n)
+
         if lr_scheduler is not None:
             lr_scheduler.step()
 
-        log_info.append('train: l1_loss={:.4f}'.format(l1_loss))
-        log_info.append('train: id_loss={:.4f}'.format(id_loss))
-        log_info.append('train: total_loss={:.4f}'.format(train_loss))
-        # writer.add_scalars('loss', {'train': train_loss}, epoch)
-        # writer.add_scalars('loss', {'train': train_loss}, epoch)
-        writer.add_scalars('loss', {'train': train_loss}, epoch)
+        if rank == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            l1_loss = l1_v / l1_n
+            id_loss = id_v / id_n
+            train_loss = train_v / train_n
+            log_info.append('train: l1_loss={:.4f}'.format(l1_loss))
+            log_info.append('train: id_loss={:.4f}'.format(id_loss))
+            log_info.append('train: total_loss={:.4f}'.format(train_loss))
+            wandb.log({
+                'train/loss': train_loss,
+                'train/id_loss': id_loss,
+                'train/l1_loss': l1_loss,
+                'lr': current_lr
+            }, epoch)
 
-        if n_gpus > 1:
-            model_ = model.module
-        else:
-            model_ = model
+        # if n_gpus > 1:
+        #     model_ = model.module
+        # else:
+        #     model_ = model
         model_spec = config['model']
-        model_spec['sd'] = model_.state_dict()
+        model_spec['sd'] = model.module.state_dict()
         optimizer_spec = config['optimizer']
         optimizer_spec['sd'] = optimizer.state_dict()
         sv_file = {
@@ -244,36 +269,38 @@ def main(config_, save_path):
             'epoch': epoch
         }
 
-        torch.save(sv_file, os.path.join(save_path, 'epoch-last.pth'))
-
-        if (epoch_save is not None) and (epoch % epoch_save == 0):
-            torch.save(sv_file,
-                os.path.join(save_path, 'epoch-{}.pth'.format(epoch)))
+        if rank == 0:
+            torch.save(sv_file, os.path.join(save_path, 'epoch-last.pth'))
+            if (epoch_save is not None) and (epoch % epoch_save == 0):
+                torch.save(sv_file,
+                    os.path.join(save_path, 'epoch-{}.pth'.format(epoch)))
 
         if (epoch_val is not None) and (epoch % epoch_val == 0):
-            if n_gpus > 1 and (config.get('eval_bsize') is not None):
-                model_ = model.module
-            else:
-                model_ = model
-            val_res = eval_psnr(val_loader, model_,
+            val_res = eval_psnr(val_loader, model.module,
                 data_norm=config['data_norm'],
                 eval_type=config.get('eval_type'),
                 eval_bsize=config.get('eval_bsize'))
 
-            log_info.append('val: psnr={:.4f}'.format(val_res))
-            writer.add_scalars('psnr', {'val': val_res}, epoch)
-            if val_res > max_val_v:
-                max_val_v = val_res
-                torch.save(sv_file, os.path.join(save_path, 'epoch-best.pth'))
+            v = ddp_reduce(val_res.v)
+            n = ddp_reduce(val_res.n)
+            if rank == 0:
+                val_res = (v / n)
+                log_info.append('val: psnr={:.4f}'.format(val_res))
+                wandb.log(
+                    {'val/psnr': val_res}, epoch
+                )
+                if val_res > max_val_v:
+                    max_val_v = val_res
+                    torch.save(sv_file, os.path.join(save_path, 'epoch-best.pth'))
 
         t = timer.t()
         prog = (epoch - epoch_start + 1) / (epoch_max - epoch_start + 1)
         t_epoch = utils.time_text(t - t_epoch_start)
         t_elapsed, t_all = utils.time_text(t), utils.time_text(t / prog)
-        log_info.append('{} {}/{}'.format(t_epoch, t_elapsed, t_all))
-
-        log(', '.join(log_info))
-        writer.flush()
+        if rank == 0:
+            log_info.append('{} {}/{}'.format(t_epoch, t_elapsed, t_all))
+            log(', '.join(log_info))
+    destroy_process_group()
 
 
 if __name__ == '__main__':
@@ -282,10 +309,17 @@ if __name__ == '__main__':
     parser.add_argument('--name', default=None)
     parser.add_argument('--tag', default=None)
     parser.add_argument('--gpu', default='0')
+    parser.add_argument('--port', default='12355')
+    parser.add_argument('--save_path', default='./save')
+    parser.add_argument('--enable_amp', action='store_true', default=False,
+                        help='Enabling automatic mixed precision')
+    parser.add_argument('--compile', action='store_true', default=False,
+                        help='Enabling torch.Compile')
+    parser.add_argument('--id_loss_weight', type=float, default=1.0)
     args = parser.parse_args()
 
     # os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
     with open(args.config, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
@@ -298,4 +332,6 @@ if __name__ == '__main__':
         save_name += '_' + args.tag
     save_path = os.path.join('./save', save_name)
 
-    main(config, save_path)
+    # main(config, save_path)
+    world_size = torch.cuda.device_count()
+    mp.spawn(main, args=(world_size, config, save_path, args), nprocs=world_size)

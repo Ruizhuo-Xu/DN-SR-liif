@@ -4,6 +4,8 @@ import shutil
 import math
 import random
 import pdb
+import sys
+from typing import Any
 
 import torch
 from torch import nn
@@ -23,11 +25,12 @@ class Averager():
         self.v = 0.0
 
     def add(self, v, n=1.0):
-        self.v = (self.v * self.n + v * n) / (self.n + n)
+        # self.v = (self.v * self.n + v * n) / (self.n + n)
+        self.v += v * n
         self.n += n
 
     def item(self):
-        return self.v
+        return self.v / (self.n + 1e-6)
 
 
 class Accuracy():
@@ -88,6 +91,8 @@ def log(obj, filename='log.txt'):
 def ensure_path(path, remove=True):
     basename = os.path.basename(path.rstrip('/'))
     if os.path.exists(path):
+        sys.stdin = os.fdopen(0, "r")  # 打开标准输入流
+        sys.stdout = os.fdopen(1, "w")  # 打开标准输出流
         if remove and (basename.startswith('_')
                 or input('{} exists, remove? (y/[n]): '.format(path)) == 'y'):
             shutil.rmtree(path)
@@ -99,8 +104,8 @@ def ensure_path(path, remove=True):
 def set_save_path(save_path, remove=True):
     ensure_path(save_path, remove=remove)
     set_log_path(save_path)
-    writer = SummaryWriter(os.path.join(save_path, 'tensorboard'))
-    return log, writer
+    # writer = SummaryWriter(os.path.join(save_path, 'tensorboard'))
+    return log
 
 def set_save_path_(save_path, remove=True):
     ensure_path(save_path, remove=remove)
@@ -224,6 +229,51 @@ def resize_fn(img, size):
         transforms.Resize(size, Image.BICUBIC)(
             transforms.ToPILImage()(img)))
 
+class RandomDwonSample(object):
+    def __init__(self, scale_min=1.0, scale_max=4.0) -> None:
+        assert scale_min > 0 and scale_max > 0 and scale_max >= scale_min
+        self.scale_min = scale_min
+        self.scale_max = scale_max
+
+    def __call__(self, batch):
+        noisy_imgs, labels, basic_subsets, TM_subsets = [], [], [], []
+        hr_coords, hr_gts, cells = [], [], []
+        # 同一个batch进行相同的降采样
+        s = random.uniform(self.scale_min, self.scale_max)
+        for data in batch:
+            img_noisy, img_ori, label, basic_subset, TM_subset = data
+            labels.append(label)
+            basic_subsets.append(basic_subset)
+            TM_subsets.append(TM_subset)
+            # downsample
+            w_hr = img_ori.shape[-1]
+            w_lr = round(w_hr / s)
+            img_noisy_lr = resize_fn(img_noisy, w_lr)
+            hr_coord, hr_gt = to_pixel_samples(img_ori)
+            cell = torch.ones_like(hr_coord)
+            cell[:, 0] *= 2 / w_hr
+            cell[:, 1] *= 2 / w_hr
+            hr_coords.append(hr_coord)
+            hr_gts.append(hr_gt)
+            cells.append(cell)
+
+            noisy_imgs.append(img_noisy_lr)
+        noisy_imgs = torch.stack(noisy_imgs, dim=0)
+        hr_coords = torch.stack(hr_coords, dim=0)
+        hr_gts = torch.stack(hr_gts, dim=0)
+        cells = torch.stack(cells, dim=0)
+        labels = torch.stack(labels, dim=0)
+        basic_subsets = torch.stack(basic_subsets, dim=0)
+        TM_subsets = torch.stack(TM_subsets, dim=0)
+        return {
+            'inp': noisy_imgs,
+            'coord': hr_coords,
+            'cell': cells,
+            'gt': hr_gts,
+            'label': labels,
+            'basic_subset': basic_subsets,
+            'TM_subset': TM_subsets
+        }
 
 def random_downsample(scale_min=1.0, scale_max=4.0):
     assert scale_min > 0 and scale_max > 0 and scale_max >= scale_min
@@ -359,3 +409,32 @@ def setup_seed(seed):
      random.seed(seed)
      os.environ['PYTHONHASHSEED'] = str(seed)  # 为了禁止hash随机化，使得实验可复现。
      torch.backends.cudnn.deterministic = True
+
+
+class NativeScalerWithGradNormCount:
+    state_dict_key = "amp_scaler"
+
+    def __init__(self):
+        self._scaler = torch.cuda.amp.GradScaler()
+
+    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
+        self._scaler.scale(loss).backward(create_graph=create_graph)
+        if update_grad:
+            if clip_grad is not None:
+                assert parameters is not None
+                self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
+                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
+            else:
+                self._scaler.unscale_(optimizer)
+                norm = get_grad_norm_(parameters)
+            self._scaler.step(optimizer)
+            self._scaler.update()
+        else:
+            norm = None
+        return norm
+
+    def state_dict(self):
+        return self._scaler.state_dict()
+
+    def load_state_dict(self, state_dict):
+        self._scaler.load_state_dict(state_dict)

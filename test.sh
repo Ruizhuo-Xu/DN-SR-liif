@@ -1,5 +1,5 @@
 #!/bin/bash
-CUDA_VISIBLE_DEVICES=3 \
+CUDA_VISIBLE_DEVICES=0 \
 python test.py --config configs/test_depthFace/test.yaml \
-    --gpu 3 \
-    --model save/lock3dface_ori_SR_1_8-cos-id1.0/epoch-best.pth
+    --gpu 0 \
+    --model save/LIIF-SR_no_idLoss/epoch-last.pth

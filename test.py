@@ -97,10 +97,10 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
         res = metric_fn(pred, batch['gt'])
         val_res.add(res.item(), inp.shape[0])
 
-        if verbose:
-            pbar.set_description('val {:.4f}'.format(val_res.item()))
+        # if verbose:
+        #     pbar.set_description('val {:.4f}'.format(val_res.item()))
 
-    return val_res.item()
+    return val_res
 
 
 def calc_batch_acc(batch, model, gallery_feats, gallery_labels,
