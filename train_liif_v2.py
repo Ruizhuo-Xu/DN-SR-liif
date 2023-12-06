@@ -127,7 +127,10 @@ def get_id_model():
 
 def train(train_loader, model, optimizer, id_model=None):
     model.train()
-    l1_loss_fn = utils.WeightedL1Loss((128, 128))
+    if config.get('WeightedL1Loss'):
+        l1_loss_fn = utils.WeightedL1Loss((128, 128))
+    else:
+        l1_loss_fn = nn.L1Loss()
     id_loss_fn = utils.CosineSimilarityLoss()
     # id_loss_fn = nn.L1Loss()
 
@@ -174,7 +177,11 @@ def train(train_loader, model, optimizer, id_model=None):
                 id_loss = torch.Tensor([0]).cuda()
                 heatmap = None
 
-            l1_loss = l1_loss_fn(pred, gt, heatmap)
+            if config.get('WeightedL1Loss'):
+                l1_loss_weight = config.get('l1_loss_weight', 1.0)
+                l1_loss = l1_loss_fn(pred, gt, heatmap)
+            else:
+                l1_loss = l1_loss_fn(pred, gt)
             loss = l1_loss + id_loss
 
             l1_loss_avg.add(l1_loss.item())
@@ -184,6 +191,11 @@ def train(train_loader, model, optimizer, id_model=None):
             l1_loss.backward()
             # pdb.set_trace()
             optimizer.step()
+
+            tqdm.set_postfix(t, {'loss': train_loss.item(),
+                                 'l1_loss': l1_loss_avg.item(),
+                                 'id_loss': id_loss_avg.item()
+                                 })
 
             pred = None; loss = None;
 
@@ -213,8 +225,8 @@ def main(rank, world_size, config_, save_path, args):
     model, optimizer, epoch_start, lr_scheduler = prepare_training()
     model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     id_model = get_id_model()
-    if id_model:
-        id_model = DDP(id_model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    # if id_model:
+    #     id_model = DDP(id_model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
 
     epoch_max = config['epoch_max']
     epoch_val = config.get('epoch_val')
@@ -315,6 +327,7 @@ if __name__ == '__main__':
                         help='Enabling automatic mixed precision')
     parser.add_argument('--compile', action='store_true', default=False,
                         help='Enabling torch.Compile')
+    parser.add_argument('--WeightedL1Loss', action='store_true', default=False)
     parser.add_argument('--id_loss_weight', type=float, default=1.0)
     args = parser.parse_args()
 
@@ -330,7 +343,7 @@ if __name__ == '__main__':
         save_name = '_' + args.config.split('/')[-1][:-len('.yaml')]
     if args.tag is not None:
         save_name += '_' + args.tag
-    save_path = os.path.join('./save', save_name)
+    save_path = os.path.join(args.save_path, save_name)
 
     # main(config, save_path)
     world_size = torch.cuda.device_count()

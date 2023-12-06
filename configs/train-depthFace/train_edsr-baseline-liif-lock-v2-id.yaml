@@ -4,6 +4,7 @@ train_dataset:
     args:
       # root_path_1: datafiles/lock3dface_avg_train.txt
       datafile: datafiles/lock3dface_train_smplify.txt
+      # datafile: datafiles/lock3dface_train.txt
       num2id: datafiles/num2id_lock3d.npy
       augment: true
       repeat: 1
@@ -47,12 +48,23 @@ model:
       args:
         out_dim: 1
         hidden_list: [256, 256, 256, 256]
-    local_ensemble: true
+    posff_spec:
+      name: fourier-features
+      args:
+        hidden_size: 64
+    coordemd_spec:
+      name: coordinate-embedding
+      args:
+        channel: 64
+        size: 128
+    local_ensemble: True
     feat_unfold: False
     cell_decode: False
 
-# id_net: './save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth'
-# id_loss_weight: 0.1
+id_net: './save/led3d-experiment/0509-LED3D-SGD-ORI/epoch-best.pth'
+id_loss_weight: 1.0
+l1_loss_weight: 1.0
+WeightedL1Loss: true
 
 optimizer:
   name: adam
@@ -62,7 +74,7 @@ epoch_max: 100
 multi_step_lr:
   # milestones: [200, 400, 600, 800]
   # milestones: [20, 40, 60, 80]
-  milestones: [50]
+  milestones: [250]
   gamma: 0.5
 
 epoch_val: 1

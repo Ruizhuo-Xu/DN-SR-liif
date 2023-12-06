@@ -11,6 +11,7 @@ from utils import make_coord
 class LIIF(nn.Module):
 
     def __init__(self, encoder_spec, imnet_spec=None,
+                 posff_spec=None, coordemd_spec=None,
                  local_ensemble=True, feat_unfold=True, cell_decode=True):
         super().__init__()
         self.local_ensemble = local_ensemble
@@ -19,11 +20,21 @@ class LIIF(nn.Module):
 
         self.encoder = models.make(encoder_spec)
 
+        self.pos_dim = 2
+        self.posff = None
+        self.coordemd = None
+        if posff_spec:
+            self.posff = models.make(posff_spec)
+            self.pos_dim += self.posff.out_dim
+        if coordemd_spec:
+            self.coordemd = models.make(coordemd_spec)
+            self.pos_dim += self.coordemd.out_dim
+        
         if imnet_spec is not None:
             imnet_in_dim = self.encoder.out_dim
             if self.feat_unfold:
                 imnet_in_dim *= 9
-            imnet_in_dim += 2 # attach coord
+            imnet_in_dim += self.pos_dim # attach coord
             if self.cell_decode:
                 imnet_in_dim += 2
             self.imnet = models.make(imnet_spec, args={'in_dim': imnet_in_dim})
@@ -82,6 +93,12 @@ class LIIF(nn.Module):
                 rel_coord[:, :, 0] *= feat.shape[-2]
                 rel_coord[:, :, 1] *= feat.shape[-1]
                 inp = torch.cat([q_feat, rel_coord], dim=-1)
+                if self.posff:
+                    pos_fourier_feature = self.posff(rel_coord)
+                    inp = torch.cat([inp, pos_fourier_feature], dim=-1)
+                if self.coordemd:
+                    coord_embedding = self.coordemd(rel_coord)
+                    inp = torch.cat([inp, coord_embedding], dim=-1)
 
                 if self.cell_decode:
                     rel_cell = cell.clone()

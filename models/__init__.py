@@ -5,3 +5,4 @@ from . import liif
 from . import misc
 from . import led3d
 from . import arcface
+from . import position_encoding

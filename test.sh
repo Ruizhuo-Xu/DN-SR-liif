@@ -1,5 +1,5 @@
 #!/bin/bash
-CUDA_VISIBLE_DEVICES=0 \
+export CUDA_VISIBLE_DEVICES=3
+
 python test.py --config configs/test_depthFace/test.yaml \
-    --gpu 0 \
-    --model save/LIIF-SR_no_idLoss/epoch-last.pth
+    --model save/baseline_new/LIIF-SR_1.0WeightedL1_1.0idLoss_posff_coordEmb/epoch-last.pth

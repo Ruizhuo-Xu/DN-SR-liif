@@ -228,7 +228,8 @@ def eval(loader, SR_model, ID_model, gallery, data_norm=None,
         pred = pred * gt_div + gt_sub
         pred.clamp_(0, 1)
         res = psnr_fn(pred, batch['gt'])
-        psnr_res.add(res.item(), inp.shape[0])
+        if not torch.isinf(res):
+            psnr_res.add(res.item(), inp.shape[0])
 
         bs, n_coords, channels = pred.shape
         side = int(math.sqrt(n_coords))
@@ -266,7 +267,7 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', default='0')
     args = parser.parse_args()
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    # os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     # fix seed
     utils.setup_seed(42)
 
