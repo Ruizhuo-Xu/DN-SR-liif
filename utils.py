@@ -324,8 +324,8 @@ def calc_id_loss(pred, gt, model, id_loss_fn):
     # gt: B C H W
     model.eval()
     # with torch.no_grad():
-    pred_feat = model(pred, is_train=False)
     gt_feat = model(gt, is_train=False)
+    pred_feat = model(pred, is_train=False)
     id_loss = id_loss_fn(pred_feat, gt_feat)
 
     return id_loss
